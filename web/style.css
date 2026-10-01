@@ -531,6 +531,19 @@ input[type="range"]::-moz-range-thumb {
 }
 .ref .idx.target { background: var(--accent); }
 
+.ref .dim {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  background: rgba(0, 0, 0, 0.72);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: #cbd5e1;
+}
+.ref .dim.shrunk { background: rgba(251, 191, 36, 0.85); color: #1a1200; }
+
 .ref .del {
   position: absolute;
   right: 3px; top: 3px;
