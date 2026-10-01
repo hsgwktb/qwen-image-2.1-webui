@@ -464,3 +464,98 @@ input[type="range"]::-moz-range-thumb {
 }
 .btn.loading .spin { display: block; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- reference images (image editing) ---------- */
+
+.tag {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted-2);
+  background: #0c0f14;
+  white-space: nowrap;
+}
+.tag.on  { color: var(--ok);  border-color: rgba(52, 211, 153, 0.40); }
+.tag.off { color: var(--err); border-color: rgba(248, 113, 113, 0.35); }
+
+.drop {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: #0c0f14;
+  padding: 18px 14px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.drop:hover { border-color: var(--accent); }
+.drop.over  { border-color: var(--accent); background: rgba(124, 92, 255, 0.10); }
+
+.drop-icon { font-size: 22px; opacity: 0.7; }
+.drop-main { margin-top: 6px; font-size: 12.5px; color: var(--muted); }
+.drop-sub  { margin-top: 4px; font-size: 11px; color: var(--muted-2); }
+.drop-sub b { color: var(--muted); }
+.link { color: var(--accent-2); text-decoration: underline; cursor: pointer; }
+
+.refs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.refs:empty { display: none; }
+
+.ref {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+  aspect-ratio: 1 / 1;
+  background: #0a0c10;
+}
+.ref img { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+.ref .idx {
+  position: absolute;
+  left: 3px; bottom: 3px;
+  background: rgba(0, 0, 0, 0.72);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: #fff;
+}
+.ref .idx.target { background: var(--accent); }
+
+.ref .del {
+  position: absolute;
+  right: 3px; top: 3px;
+  width: 16px; height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ref .del:hover { background: var(--err); }
+
+.drop-note {
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted-2);
+}
+.drop-note code {
+  font-family: var(--mono);
+  color: var(--muted);
+  background: var(--panel-2);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
