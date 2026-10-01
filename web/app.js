@@ -27,7 +27,6 @@
     editTag: $("edit-tag"),
     resolution: $("resolution"),
     resolutionVal: $("resolution-val"),
-    maxSide: $("max-side"),
 
     presets: $("presets"),
     width: $("width"),
@@ -157,13 +156,15 @@
         : "当前 ComfyUI 缺少 TextEncodeQwenImage21 节点，只能文生图";
     }
 
-    if (cfg.max_upload_side) {
-      if (els.maxSide) els.maxSide.textContent = cfg.max_upload_side;
-      if (els.resolution) els.resolution.max = String(cfg.max_upload_side);
+    if (cfg.max_resolution && els.resolution) {
+      els.resolution.max = String(cfg.max_resolution);
     }
-    if (cfg.downscale_on_upload === false) {
-      log("注意：服务端没有 Pillow，上传图片不会自动缩放。", "w");
-    }
+    log(
+      cfg.downscale_on_upload
+        ? "上传图片会等比缩放到长边 " + cfg.max_upload_side + " px。"
+        : "上传图片保持原始分辨率，不做缩放。",
+      "i",
+    );
 
     if (cfg.gpu_name) {
       els.vram.textContent =
@@ -264,7 +265,7 @@
       if (r.width && r.height) {
         dim.textContent = r.width + "×" + r.height;
         dim.title = r.resized
-          ? "原图 " + r.originalWidth + "×" + r.originalHeight + "，已等比缩放到长边 " + (cfg.max_upload_side || 2048)
+          ? "原图 " + r.originalWidth + "×" + r.originalHeight + "，已等比缩放"
           : "原始分辨率，未缩放";
       }
 
