@@ -21,6 +21,11 @@
     promptLen: $("prompt-len"),
     negative: $("negative"),
 
+    drop: $("drop"),
+    file: $("file"),
+    refs: $("refs"),
+    editTag: $("edit-tag"),
+
     presets: $("presets"),
     width: $("width"),
     height: $("height"),
@@ -68,6 +73,10 @@
   let cfg = {};
   let polling = null;
   let inflight = 0;
+
+  // reference images for image editing; index 0 is the edit target
+  let REFS = [];
+  const MAX_REFS = 10;
 
   /* ------------------------------ logging ------------------------------ */
 
@@ -135,6 +144,15 @@
     els.quant.textContent = cfg.quant || "—";
     els.te.textContent = cfg.text_encoder_short || "—";
     els.assetSrc.textContent = cfg.asset_source || "—";
+
+    if (els.editTag) {
+      const ok = !!cfg.editing_available;
+      els.editTag.textContent = ok ? "可编辑" : "不可用";
+      els.editTag.className = "tag " + (ok ? "on" : "off");
+      els.editTag.title = ok
+        ? "ComfyUI 提供 TextEncodeQwenImage21，支持参考图编辑"
+        : "当前 ComfyUI 缺少 TextEncodeQwenImage21 节点，只能文生图";
+    }
 
     if (cfg.gpu_name) {
       els.vram.textContent =
@@ -213,6 +231,90 @@
     return holders;
   }
 
+  /* --------------------------- reference images ------------------------ */
+
+  function renderRefs() {
+    els.refs.innerHTML = "";
+    REFS.forEach((r, i) => {
+      const card = document.createElement("div");
+      card.className = "ref";
+
+      const img = document.createElement("img");
+      img.src = r.url;
+      img.alt = r.name;
+      img.title = r.name;
+
+      const idx = document.createElement("span");
+      idx.className = "idx" + (i === 0 ? " target" : "");
+      idx.textContent = "image" + (i + 1);
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "del";
+      del.textContent = "×";
+      del.title = "移除";
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        REFS.splice(i, 1);
+        renderRefs();
+      });
+
+      card.append(img, idx, del);
+      els.refs.appendChild(card);
+    });
+  }
+
+  async function addFiles(files) {
+    const list = [...files].filter((f) => f.type.startsWith("image/"));
+    if (!list.length) return;
+
+    for (const f of list) {
+      if (REFS.length >= MAX_REFS) {
+        showBanner("最多 " + MAX_REFS + " 张参考图，多余的已忽略。");
+        break;
+      }
+      try {
+        const r = await fetch("/api/upload?filename=" + encodeURIComponent(f.name), {
+          method: "POST",
+          headers: { "Content-Type": f.type || "application/octet-stream" },
+          body: f,
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+        REFS.push({ name: j.name, url: j.url });
+        log("已上传参考图 " + j.name, "i");
+      } catch (e) {
+        log("上传失败 " + f.name + "：" + e.message, "e");
+        showBanner("上传失败：" + e.message);
+      }
+    }
+    renderRefs();
+  }
+
+  function wireUploader() {
+    els.drop.addEventListener("click", () => els.file.click());
+    els.file.addEventListener("change", () => {
+      addFiles(els.file.files);
+      els.file.value = "";
+    });
+
+    ["dragenter", "dragover"].forEach((ev) =>
+      els.drop.addEventListener(ev, (e) => {
+        e.preventDefault();
+        els.drop.classList.add("over");
+      }),
+    );
+    ["dragleave", "drop"].forEach((ev) =>
+      els.drop.addEventListener(ev, (e) => {
+        e.preventDefault();
+        els.drop.classList.remove("over");
+      }),
+    );
+    els.drop.addEventListener("drop", (e) => {
+      if (e.dataTransfer && e.dataTransfer.files) addFiles(e.dataTransfer.files);
+    });
+  }
+
   /* ------------------------------ generate ----------------------------- */
 
   async function generate() {
@@ -237,12 +339,19 @@
       scheduler: els.scheduler.value,
       seed,
       batch: Number(els.batch.value) || 1,
+      images: REFS.map((r) => r.name),
     };
 
     setBusy(true);
     setProgress(3, "已提交", "");
     const holders = addPending(payload.batch);
-    log("提交任务 " + payload.width + "×" + payload.height + " · " + payload.steps + "步 · seed " + seed, "i");
+    log(
+      (payload.images.length ? "编辑" : "文生图") +
+        " · " + payload.width + "×" + payload.height +
+        " · " + payload.steps + "步 · seed " + seed +
+        (payload.images.length ? " · " + payload.images.length + " 张参考图" : ""),
+      "i",
+    );
 
     let res;
     try {
@@ -346,6 +455,8 @@
   }
 
   function wire() {
+    wireUploader();
+
     els.prompt.addEventListener("input", () => {
       els.promptLen.textContent = els.prompt.value.length;
     });
