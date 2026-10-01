@@ -46,6 +46,36 @@ os.environ["QWEN_QUANT"] = "Q6_K"
 
 ---
 
+## 图像编辑
+
+Qwen-Image-2.1 的编辑能力用的是**同一套权重** —— 不需要额外下载模型，只是把参考图喂给同一个
+`TextEncodeQwenImage21` 节点。WebUI 左侧「参考图 · 图像编辑」面板就是入口。
+
+用法：
+
+1. 拖拽或点击上传参考图（**最多 10 张**）
+2. **第 1 张是编辑目标**，其余是参考图
+3. 在提示词里用 `<image1>`、`<image2>` 引用它们，例如
+   `把 <image1> 的衣服换成 <image2> 的款式`
+4. 点生成。**留空参考图就自动回到纯文生图**
+
+几条来自官方模板的注意事项：
+
+- **输出尺寸跟随 image_1**；其他参考图可以尺寸/比例不同
+- `resolution` 是**总像素预算**（不是宽高），默认 1024，模型原生支持到 2048
+- 官方推荐 euler + 40–50 步；cfg 保持 1，此时 negative prompt 不生效
+- 编辑时画布取自 image_1 的 latent（`KSampler.latent_image` 接编码节点的第三个输出），
+  而不是空白 latent
+
+张量合并走 `BatchImagesNode`（官方模板用的节点）；如果该版本 ComfyUI 没有，会自动回退到
+经典的两输入 `ImageBatch`。当前选用了哪个能在 `/api/config` 的 `image_batch_node` 字段看到。
+
+上游还有一个**可选的提示词增强器**（`qwen3.5_9b_qwen_image_2.1_pe_i2i`，8.82 GB），
+用 Qwen3.5 把「换衣服」这类短指令改写成完整描述再交给编辑模型，效果更好但要额外下载权重，
+本仓库没有启用。
+
+---
+
 ## 架构
 
 ```
@@ -57,8 +87,10 @@ Colab L4 runtime
 └── server.py (:7860)          ← 自定义 WebUI
     ├── GET  /                 ← 由 GitHub 拉取的 index.html
     ├── GET  /assets/*         ← 由 GitHub 拉取的 style.css / app.js
-    ├── POST /api/generate     ← 构造工作流并提交给 ComfyUI
+    ├── POST /api/generate     ← 构造工作流并提交给 ComfyUI（带 images 即为编辑）
     ├── GET  /api/result/{id}  ← 轮询进度与结果
+    ├── POST /api/upload       ← 参考图写入 ComfyUI 的 input/ 目录
+    ├── GET  /api/input_image  ← 代理 ComfyUI 的 /view?type=input（参考图预览）
     ├── GET  /api/image        ← 代理 ComfyUI 的 /view
     └── GET  /api/history      ← 最近生成记录
 ```
