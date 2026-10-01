@@ -77,16 +77,16 @@
             <div class="drop-icon">🖼</div>
             <div class="drop-main">拖拽图片到此处，或 <span class="link">点击选择</span></div>
             <div class="drop-sub">最多 10 张 · 第 1 张是<b>编辑目标</b>，其余为参考图</div>
-            <div class="drop-sub">超过 <b id="max-side">2048</b> px 自动等比缩到长边 2048，≤2048 保持原分辨率</div>
+            <div class="drop-sub">上传统一<b>保持原图分辨率</b>，不做任何缩放或重编码</div>
           </div>
           <div class="refs" id="refs"></div>
 
           <div style="margin-top:13px">
-            <label class="lbl" for="resolution">参考图分辨率<span class="val" id="resolution-val">1024</span></label>
-            <input type="range" id="resolution" min="0" max="2048" step="32" value="1024">
+            <label class="lbl" for="resolution">参考图分辨率<span class="val" id="resolution-val">原始尺寸</span></label>
+            <input type="range" id="resolution" min="0" max="4096" step="32" value="0">
             <div class="drop-note" style="margin-top:6px">
-              模型会把参考图缩放到约 <code>resolution × resolution</code> 像素（保持比例）。
-              <code>0</code> 表示保持上传时的原始尺寸 —— 想用满 2048 就拉到 2048 或 0。
+              <code>0</code> = 保持上传时的原始分辨率（与图片一致）。设为非 0 时，模型会把参考图
+              缩放到约 <code>resolution × resolution</code> 像素（保持比例），模型原生支持到 2048。
             </div>
           </div>
 
