@@ -298,15 +298,24 @@ def start_webui(quant: str, text_encoder: str) -> subprocess.Popen:
 
 def fetch_webui_code() -> None:
     """Pull server.py from GitHub so the notebook itself stays free of logic."""
+    import urllib.error
     import urllib.request
 
-    url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_REF}/server.py"
-    try:
-        with urllib.request.urlopen(url, timeout=30) as r:
-            Path("/content/server.py").write_bytes(r.read())
-        log(f"✓ 已从 GitHub 获取 server.py")
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"无法从 GitHub 获取 server.py: {exc}") from exc
+    sources = [
+        f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_REF}/server.py",
+        f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@{GITHUB_REF}/server.py",
+    ]
+    last: Exception | None = None
+    for url in sources:
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                Path("/content/server.py").write_bytes(r.read())
+            log(f"✓ 已从 GitHub 获取 server.py ({url.split('/')[2]})")
+            return
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            log(f"   ↳ {url.split('/')[2]} 失败: {exc}")
+    raise RuntimeError(f"无法从 GitHub 获取 server.py: {last}")
 
 
 def public_url() -> str | None:
