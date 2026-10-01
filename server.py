@@ -179,6 +179,41 @@ def pick(info: dict, *candidates: str) -> str:
     raise RuntimeError("ComfyUI 缺少以下节点之一: " + ", ".join(candidates))
 
 
+def combo_values(info: dict, cls: str, field: str) -> list | None:
+    """The allowed values of a combo input, straight from the live schema."""
+    spec = (info.get(cls, {}).get("input", {}).get("required", {}) or {}).get(field)
+    if isinstance(spec, list) and spec and isinstance(spec[0], list):
+        return spec[0]
+    return None
+
+
+def pick_combo(info: dict, cls: str, field: str, preferred: str, contains: str | None = None) -> str:
+    """Return `preferred` when the server accepts it, else the closest match."""
+    vals = combo_values(info, cls, field)
+    if not vals:
+        return preferred
+    if preferred in vals:
+        return preferred
+    if contains:
+        for v in vals:
+            if contains in str(v):
+                return v
+    return preferred
+
+
+def require_value(info: dict, cls: str, field: str, value: str, label: str) -> None:
+    """
+    Fail loudly when a model file is not where ComfyUI looks for it. Without
+    this the server only reports a generic prompt_outputs_failed_validation.
+    """
+    vals = combo_values(info, cls, field)
+    if vals is not None and value not in vals:
+        raise RuntimeError(
+            f"{label} 不在 ComfyUI 的可选列表中: {value!r}。"
+            f"当前 {cls}.{field} 可选: {vals[:8]}"
+        )
+
+
 def make_string_node(info: dict, wf: dict, node_id: str, text: str):
     """
     Create a string-primitive node, discovering its input name from the live
@@ -217,18 +252,31 @@ def build_workflow(req: dict, info: dict) -> dict:
     wf: dict[str, Any] = {}
 
     # --- model ------------------------------------------------------------
-    unet_cls = pick(info, "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced", "UNETLoader")
-    wf["1"] = make_node(unet_cls, info, {}, {"unet_name": unet_name})
+    unet_cls = next(
+        (c for c in ("UnetLoaderGGUF", "UnetLoaderGGUFAdvanced") if c in info), None
+    )
+    if unet_cls is None:
+        if unet_name.lower().endswith(".gguf"):
+            raise RuntimeError(
+                "ComfyUI 没有注册 GGUF 加载节点（UnetLoaderGGUF）。"
+                "请检查 custom_nodes/ComfyUI-GGUF 是否安装成功、gguf 包是否可用。"
+            )
+        unet_cls = pick(info, "UNETLoader")
+
+    unet_req = info[unet_cls].get("input", {}).get("required", {}) or {}
+    unet_field = "unet_name" if "unet_name" in unet_req else "ckpt_name"
+    require_value(info, unet_cls, unet_field, unet_name, "DiT 模型")
+    wf["1"] = make_node(unet_cls, info, {}, {unet_field: unet_name})
 
     # --- text encoder -----------------------------------------------------
+    te_type = pick_combo(info, "CLIPLoader", "type", "qwen_image", contains="qwen")
+    require_value(info, "CLIPLoader", "clip_name", clip_name, "文本编码器")
     wf["2"] = make_node(
-        "CLIPLoader",
-        info,
-        {},
-        {"clip_name": clip_name, "type": "qwen_image"},
+        "CLIPLoader", info, {}, {"clip_name": clip_name, "type": te_type}
     )
 
     # --- vae --------------------------------------------------------------
+    require_value(info, "VAELoader", "vae_name", vae_name, "VAE")
     wf["3"] = make_node("VAELoader", info, {}, {"vae_name": vae_name})
 
     # --- latent -----------------------------------------------------------
@@ -396,8 +444,10 @@ async def api_generate(request: Request) -> JSONResponse:
         wf = build_workflow(req, info)
         res = comfy_post("/prompt", {"prompt": wf, "client_id": "qwen21-webui"})
     except httpx.HTTPStatusError as exc:
-        detail = exc.response.text[:600]
-        return JSONResponse({"error": f"ComfyUI 拒绝工作流: {detail}"}, status_code=502)
+        detail = exc.response.text[:2000]
+        return JSONResponse(
+            {"error": f"ComfyUI 拒绝了工作流: {detail}"}, status_code=502
+        )
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
 
