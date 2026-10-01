@@ -20,12 +20,15 @@ Environment:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -38,6 +41,11 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO", "hsgwktb/qwen-image-2.1-webui")
 GITHUB_REF = os.environ.get("GITHUB_REF", "main")
 ASSET_SOURCE = os.environ.get("ASSET_SOURCE", "proxy").lower()
 PORT = int(os.environ.get("PORT", "7860"))
+
+# ComfyUI's LoadImage reads from its own input directory; uploads land there.
+INPUT_DIR = Path(os.environ.get("COMFY_INPUT_DIR", "/content/ComfyUI/input"))
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+MAX_REFERENCE_IMAGES = 10
 
 RAW_BASE = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_REF}/web"
 CDN_BASE = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@{GITHUB_REF}/web"
@@ -132,6 +140,27 @@ def gpu_snapshot() -> dict:
     return info
 
 
+_EDIT_CAP: dict[str, Any] = {"value": None, "batch": None, "ts": 0.0}
+
+
+def editing_capabilities() -> tuple[bool, str | None]:
+    """(encode node present?, node used to merge several references)."""
+    now = time.time()
+    if _EDIT_CAP["value"] is None or now - _EDIT_CAP["ts"] > 300:
+        try:
+            info = object_info()
+            _EDIT_CAP["value"] = "TextEncodeQwenImage21" in info
+            _EDIT_CAP["batch"] = image_batch_class(info)
+            _EDIT_CAP["ts"] = now
+        except Exception:  # noqa: BLE001
+            return False, None
+    return bool(_EDIT_CAP["value"]), _EDIT_CAP["batch"]
+
+
+def editing_available() -> bool:
+    return editing_capabilities()[0]
+
+
 # --------------------------------------------------------------------------
 # workflow construction — schema-driven so it survives ComfyUI version drift
 # --------------------------------------------------------------------------
@@ -143,7 +172,7 @@ def gpu_snapshot() -> dict:
 _TYPE_MARKERS = {
     "INT", "FLOAT", "STRING", "BOOLEAN", "IMAGE", "LATENT", "MASK", "MODEL",
     "CLIP", "VAE", "CONDITIONING", "CONTROL_NET", "SAMPLER", "SIGMAS",
-    "GUIDER", "NOISE", "AUDIO", "VIDEO", "WEBCAM", "ANY", "*",
+    "GUIDER", "NOISE", "AUDIO", "VIDEO", "WEBCAM", "IMAGEUPLOAD", "ANY", "*",
 }
 
 
@@ -156,9 +185,14 @@ def _default_for(spec: Any) -> Any:
     if isinstance(first, list):                     # combo of allowed values
         return first[0] if first else None
 
-    if isinstance(first, str) and first.upper() in _TYPE_MARKERS:
-        opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+    # A dict in position 1 means this is a typed input such as
+    # ["INT", {"default": 1024}] — the type name is not a value.
+    opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else None
+    if opts is not None:
         return opts.get("default")                  # may legitimately be absent
+
+    if isinstance(first, str) and first.upper() in _TYPE_MARKERS:
+        return None                                 # ["IMAGEUPLOAD"] with no opts
 
     if isinstance(first, (int, float, bool, str)):
         return first
@@ -188,6 +222,18 @@ def make_node(class_type: str, info: dict, links: dict, overrides: dict) -> dict
                 if dflt is not None:
                     inputs[name] = dflt
     return {"class_type": class_type, "inputs": inputs}
+
+
+def image_batch_class(info: dict) -> str | None:
+    """
+    Node used to merge several reference images into the single batched IMAGE
+    that TextEncodeQwenImage21 expects. The official template uses
+    BatchImagesNode; classic ComfyUI only ships the two-input ImageBatch.
+    """
+    for c in ("BatchImagesNode", "ImageBatch", "ImageBatchMulti"):
+        if c in info:
+            return c
+    return None
 
 
 def pick(info: dict, *candidates: str) -> str:
@@ -297,6 +343,11 @@ def build_workflow(req: dict, info: dict, prefer_modern: bool = True) -> dict:
     require_value(info, "VAELoader", "vae_name", vae_name, "VAE")
     wf["3"] = make_node("VAELoader", info, {}, {"vae_name": vae_name})
 
+    # --- reference images (image editing) ---------------------------------
+    images = [
+        str(x) for x in (req.get("images") or []) if str(x).strip()
+    ][:MAX_REFERENCE_IMAGES]
+
     # --- latent -----------------------------------------------------------
     latent_cls = pick(info, "EmptyLatentImage", "EmptySD3LatentImage")
     wf["4"] = make_node(
@@ -305,12 +356,13 @@ def build_workflow(req: dict, info: dict, prefer_modern: bool = True) -> dict:
         {},
         {"width": width, "height": height, "batch_size": batch},
     )
+    latent_ref: list[Any] = ["4", 0]
 
     # --- conditioning + sampling -----------------------------------------
     # Qwen-Image-2.1 ships a dedicated encoder node that returns both
     # conditionings at once; older ComfyUI builds only have CLIPTextEncode.
     if prefer_modern and "TextEncodeQwenImage21" in info:
-        links = {"clip": ["2", 0], "vae": ["3", 0]}
+        links: dict[str, Any] = {"clip": ["2", 0], "vae": ["3", 0]}
         overrides: dict[str, Any] = {}
         pos_ref = make_string_node(info, wf, "6", prompt)
         neg_ref = make_string_node(info, wf, "7", negative)
@@ -321,8 +373,62 @@ def build_workflow(req: dict, info: dict, prefer_modern: bool = True) -> dict:
             # no string-primitive node: feed the literals straight in
             overrides["prompt"] = prompt
             overrides["negative_prompt"] = negative
+
+        # image_1 is the edit target, image_2..10 are references.
+        load_refs: list[Any] = []
+        for idx, name in enumerate(images, start=1):
+            nid = str(30 + idx)
+            wf[nid] = make_node("LoadImage", info, {}, {"image": name})
+            load_refs.append([nid, 0])
+
+        # The node takes ONE batched IMAGE, so the references get merged first.
+        # Node ids 50+ are reserved for the merge chain.
+        if load_refs:
+            if len(load_refs) == 1:
+                merged: Any = load_refs[0]
+            else:
+                cls = image_batch_class(info)
+                if cls is None:
+                    raise RuntimeError(
+                        "需要 BatchImagesNode 或 ImageBatch 节点来合并多张参考图，"
+                        "当前 ComfyUI 两者都没有。"
+                    )
+                if cls == "BatchImagesNode":
+                    wf["50"] = {
+                        "class_type": cls,
+                        "inputs": {
+                            f"images.image{i}": r for i, r in enumerate(load_refs)
+                        },
+                    }
+                    merged = ["50", 0]
+                else:
+                    cur = load_refs[0]
+                    for i, r in enumerate(load_refs[1:], start=51):
+                        wf[str(i)] = {
+                            "class_type": cls,
+                            "inputs": {"image1": cur, "image2": r},
+                        }
+                        cur = [str(i), 0]
+                    merged = cur
+
+            # make_node keeps only the keys the node's schema actually declares,
+            # so offering both spellings covers either ComfyUI variant.
+            links["images"] = merged
+            for i, r in enumerate(load_refs, start=1):
+                links[f"images.image_{i}"] = r
+
         wf["5"] = make_node("TextEncodeQwenImage21", info, links, overrides)
         pos, neg = ["5", 0], ["5", 1]
+
+        if images:
+            # In edit mode the canvas is derived from image_1 rather than from a
+            # blank latent — see the official image-edit template note
+            # "canvas comes from the encode latent (image_1)".
+            latent_ref = ["5", 2]
+    elif images:
+        raise RuntimeError(
+            "图像编辑需要 ComfyUI 提供 TextEncodeQwenImage21 节点，当前实例没有该节点。"
+        )
     else:
         wf["5"] = make_node("CLIPTextEncode", info, {"clip": ["2", 0]}, {"text": prompt})
         wf["6"] = make_node("CLIPTextEncode", info, {"clip": ["2", 0]}, {"text": negative})
@@ -331,7 +437,12 @@ def build_workflow(req: dict, info: dict, prefer_modern: bool = True) -> dict:
     wf["10"] = make_node(
         "KSampler",
         info,
-        {"model": ["1", 0], "positive": pos, "negative": neg, "latent_image": ["4", 0]},
+        {
+            "model": ["1", 0],
+            "positive": pos,
+            "negative": neg,
+            "latent_image": latent_ref,
+        },
         {
             "seed": seed,
             "steps": steps,
@@ -423,6 +534,10 @@ def api_config() -> JSONResponse:
         "github_repo": GITHUB_REPO,
         "github_ref": GITHUB_REF,
         "comfy_url": COMFY_URL,
+        "input_dir": str(INPUT_DIR),
+        "editing_available": editing_capabilities()[0],
+        "image_batch_node": editing_capabilities()[1],
+        "max_reference_images": MAX_REFERENCE_IMAGES,
         "unet": os.environ.get("UNET_NAME", "qwen-image-2.1-UC-Q8_0.gguf"),
         "text_encoder": os.environ.get("CLIP_NAME", "qwen3vl_8b_int8_convrot.safetensors"),
         "vae": os.environ.get("VAE_NAME", "qwen_image_2.1_vae_bf16.safetensors"),
@@ -560,6 +675,43 @@ def api_interrupt() -> JSONResponse:
 @app.get("/api/image")
 def api_image(filename: str, subfolder: str = "", type: str = "output") -> Response:
     r = http.get(f"{COMFY_URL}/view", params={"filename": filename, "subfolder": subfolder, "type": type})
+    r.raise_for_status()
+    return Response(
+        r.content,
+        media_type=r.headers.get("content-type", "image/png"),
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.post("/api/upload")
+async def api_upload(request: Request, filename: str = "") -> JSONResponse:
+    """Accept a reference image and drop it into ComfyUI's input directory."""
+    data = await request.body()
+    if not data:
+        return JSONResponse({"error": "空文件"}, status_code=400)
+    if len(data) > MAX_UPLOAD_BYTES:
+        return JSONResponse({"error": "文件过大（上限 32 MB）"}, status_code=413)
+
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(filename or ""))
+    if not safe:
+        safe = "upload.png"
+    if not Path(safe).suffix:
+        safe += ".png"
+
+    # content hash makes re-uploads idempotent and stops files clobbering
+    name = f"{hashlib.md5(data).hexdigest()[:8]}_{safe}"
+
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    (INPUT_DIR / name).write_bytes(data)
+
+    return JSONResponse(
+        {"name": name, "url": "/api/input_image?filename=" + urllib.parse.quote(name)}
+    )
+
+
+@app.get("/api/input_image")
+def api_input_image(filename: str) -> Response:
+    r = http.get(f"{COMFY_URL}/view", params={"filename": filename, "type": "input"})
     r.raise_for_status()
     return Response(
         r.content,
