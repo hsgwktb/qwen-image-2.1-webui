@@ -352,6 +352,123 @@ def public_url() -> str | None:
 
 
 # --------------------------------------------------------------------------
+# public access
+#
+# Colab's own proxyPort URL (*.prod.colab.dev) is not reachable from every
+# network. A Cloudflare quick tunnel gives a plain https://…trycloudflare.com
+# address that works without a proxy, so use that for external access.
+# --------------------------------------------------------------------------
+
+def start_tunnel(port: int) -> str | None:
+    import re as _re
+    import urllib.request
+
+    binary = "/content/cloudflared"
+    if not os.path.exists(binary):
+        url = (
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/"
+            "cloudflared-linux-amd64"
+        )
+        log(f"   下载 cloudflared …")
+        try:
+            urllib.request.urlretrieve(url, binary)
+            os.chmod(binary, 0o755)
+        except Exception as exc:  # noqa: BLE001
+            log(f"   ✗ cloudflared 下载失败: {exc}")
+            return None
+
+    logf = open("/content/cloudflared.log", "w")
+    subprocess.Popen(
+        [binary, "tunnel", "--url", f"http://127.0.0.1:{port}", "--no-autoupdate"],
+        stdout=logf,
+        stderr=subprocess.STDOUT,
+    )
+
+    for _ in range(90):
+        time.sleep(1)
+        try:
+            text = Path("/content/cloudflared.log").read_text(errors="replace")
+        except Exception:  # noqa: BLE001
+            continue
+        m = _re.search(r"https://[a-z0-9][a-z0-9-]*\.trycloudflare\.com", text)
+        if m:
+            return m.group(0)
+    dump_log("/content/cloudflared.log", 30)
+    return None
+
+
+# --------------------------------------------------------------------------
+# self-test — proves the whole ComfyUI graph actually renders an image
+# --------------------------------------------------------------------------
+
+def self_test(port: int, timeout: float = 1200.0) -> bool:
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    payload = {
+        "prompt": "a single red cube on a white table, studio lighting, photorealistic",
+        "width": 1024,
+        "height": 1024,
+        "steps": 20,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "seed": 12345,
+        "batch": 1,
+    }
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/generate",
+            data=_json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            res = _json.loads(r.read())
+    except urllib.error.HTTPError as exc:
+        body = exc.read()[:800].decode("utf-8", "replace")
+        log(f"   ✗ 自检提交失败 HTTP {exc.code}: {body}")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        log(f"   ✗ 自检提交失败: {exc}")
+        return False
+
+    pid = res.get("prompt_id")
+    log(f"   已提交自检任务 {pid}（首次会加载权重到显存，可能 1-3 分钟）")
+
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        time.sleep(5)
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/result/{pid}", timeout=30
+            ) as r:
+                st = _json.loads(r.read())
+        except Exception:  # noqa: BLE001
+            continue
+        status = st.get("status")
+        if status == "done":
+            imgs = st.get("images") or []
+            log(f"   ✓ 自检通过：生成 {len(imgs)} 张图像")
+            for im in imgs[:1]:
+                log(f"     {im.get('filename')}")
+            return True
+        if status == "error":
+            log(f"   ✗ 自检失败: {str(st.get('error'))[:900]}")
+            dump_log("/content/comfyui.log", 40)
+            return False
+        cur = f"{status} {st.get('step', '')}/{st.get('total', '')}".strip()
+        if cur != last:
+            log(f"     …{cur}")
+            last = cur
+
+    log("   ✗ 自检超时")
+    dump_log("/content/comfyui.log", 40)
+    return False
+
+
+# --------------------------------------------------------------------------
 
 def main() -> None:
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
@@ -368,23 +485,30 @@ def main() -> None:
     install_webui_deps()
     download_models(quant, text_encoder)
     fetch_webui_code()
-    start_comfyui(lowvram=(vram_gb and vram_gb < 12))
+    start_comfyui(lowvram=bool(vram_gb and vram_gb < 12))
     start_webui(quant, text_encoder)
 
-    url = public_url()
+    log("\n[自检] 生成一张测试图，验证整条链路（ComfyUI 工作流 + 模型加载）…")
+    ok = self_test(WEBUI_PORT)
+
+    log("\n[隧道] 建立公网访问地址…")
+    tunnel = start_tunnel(WEBUI_PORT)
+    proxy = public_url()
 
     log("")
     log("=" * 66)
-    log("✅ 部署完成")
+    log("✅ 部署完成" if ok else "⚠️ 部署完成，但自检未通过（见上方错误）")
     log(f"   模型      : {HF_REPO}")
     log(f"   DiT 量化  : {quant}  ({DIT_BYTES[quant] / 1024 ** 3:.2f} GB)")
     log(f"   文本编码器: {TEXT_ENCODERS[text_encoder]}")
     log(f"   显存      : {vram_gb:.1f} GB")
     log(f"   ComfyUI   : http://127.0.0.1:{COMFY_PORT}")
     log(f"   WebUI     : http://127.0.0.1:{WEBUI_PORT}")
-    if url:
-        log(f"   🔗 打开   : {url}")
-    else:
+    if tunnel:
+        log(f"   🔗 公网地址: {tunnel}")
+    if proxy:
+        log(f"   🔗 Colab代理: {proxy}")
+    if not tunnel and not proxy:
         log("   🔗 在笔记本中运行下方单元获取代理 URL")
     log("=" * 66)
 
