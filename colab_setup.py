@@ -478,6 +478,14 @@ def main() -> None:
     log("Qwen-Image-2.1 Uncensored · Colab 部署")
     log("=" * 66)
 
+    # Re-running the cell is the normal way to iterate, so clear whatever a
+    # previous attempt left bound to 8188 / 7860 before starting again.
+    subprocess.run(
+        "pkill -f 'ComfyUI/main.py'; pkill -f '/content/server.py'; pkill -f cloudflared",
+        shell=True,
+    )
+    time.sleep(3)
+
     gpu_name, vram_gb = detect_gpu()
     quant, text_encoder = choose_plan(gpu_name, vram_gb)
 
