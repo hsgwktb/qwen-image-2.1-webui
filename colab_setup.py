@@ -189,21 +189,42 @@ def install_webui_deps() -> None:
 # --------------------------------------------------------------------------
 
 def hf_download(remote: str, dest_dir: Path) -> Path:
+    """
+    Fetch one file from the model repo and place it directly in `dest_dir`.
+
+    hf_hub_download preserves the repo-relative path under local_dir, so a
+    remote name like "text_encoders/foo.safetensors" would land in
+    <dest_dir>/text_encoders/foo.safetensors. ComfyUI only scans the top level
+    of each model folder, so the file has to be flattened afterwards — that
+    mismatch is what makes ComfyUI report a mysterious
+    prompt_outputs_failed_validation.
+    """
     from huggingface_hub import hf_hub_download
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     target = dest_dir / Path(remote).name
+    nested = dest_dir / remote
+
     if target.exists() and target.stat().st_size > 0:
         log(f"   ↳ 已存在: {target.name} ({target.stat().st_size / 1024 ** 3:.2f} GB)")
         return target
 
-    path = hf_hub_download(
-        repo_id=HF_REPO,
-        filename=remote,
-        local_dir=str(dest_dir),
-        resume_download=True,
+    # a previous run left it in the nested repo layout — just relocate it
+    if nested != target and nested.exists() and nested.stat().st_size > 0:
+        shutil.move(str(nested), str(target))
+        log(f"   ↳ 已就位: {target.name} ({target.stat().st_size / 1024 ** 3:.2f} GB)")
+        return target
+
+    path = Path(
+        hf_hub_download(repo_id=HF_REPO, filename=remote, local_dir=str(dest_dir))
     )
-    return Path(path)
+    if path != target and path.exists():
+        shutil.move(str(path), str(target))
+    if not target.exists():
+        raise RuntimeError(f"下载后找不到文件: {target}")
+
+    log(f"   ↳ 已下载: {target.name} ({target.stat().st_size / 1024 ** 3:.2f} GB)")
+    return target
 
 
 def download_models(quant: str, text_encoder: str) -> None:
