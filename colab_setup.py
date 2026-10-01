@@ -322,6 +322,7 @@ def start_webui(quant: str, text_encoder: str) -> subprocess.Popen:
             "CLIP_NAME": TEXT_ENCODERS[text_encoder],
             "VAE_NAME": VAE_FILE,
             "QUANT_LABEL": quant,
+            "COMFY_INPUT_DIR": str(COMFY_DIR / "input"),
         }
     )
     logfile = open("/content/webui.log", "w")
@@ -482,22 +483,11 @@ def diagnose(info: dict) -> None:
 # self-test — proves the whole ComfyUI graph actually renders an image
 # --------------------------------------------------------------------------
 
-def self_test(port: int, timeout: float = 1200.0) -> bool:
+def _submit_and_wait(port: int, payload: dict, timeout: float, label: str) -> bool:
     import json as _json
     import urllib.error
     import urllib.request
 
-    payload = {
-        "prompt": "a single red cube on a white table, studio lighting, photorealistic",
-        "width": 1024,
-        "height": 1024,
-        "steps": 20,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "seed": 12345,
-        "batch": 1,
-    }
     try:
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/api/generate",
@@ -508,7 +498,7 @@ def self_test(port: int, timeout: float = 1200.0) -> bool:
             res = _json.loads(r.read())
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
-        log(f"   ✗ 自检提交失败 HTTP {exc.code}")
+        log(f"   ✗ {label}提交失败 HTTP {exc.code}")
         log("   —— ComfyUI 完整报错 ——")
         # wrap so the notebook output does not clip long lines
         for i in range(0, min(len(body), 3000), 110):
@@ -516,11 +506,11 @@ def self_test(port: int, timeout: float = 1200.0) -> bool:
         dump_log("/content/comfyui.log", 40)
         return False
     except Exception as exc:  # noqa: BLE001
-        log(f"   ✗ 自检提交失败: {exc}")
+        log(f"   ✗ {label}提交失败: {exc}")
         return False
 
     pid = res.get("prompt_id")
-    log(f"   已提交自检任务 {pid}（首次会加载权重到显存，可能 1-3 分钟）")
+    log(f"   已提交{label}任务 {pid}（首次会加载权重到显存，可能 1-3 分钟）")
 
     deadline = time.time() + timeout
     last = ""
@@ -536,12 +526,12 @@ def self_test(port: int, timeout: float = 1200.0) -> bool:
         status = st.get("status")
         if status == "done":
             imgs = st.get("images") or []
-            log(f"   ✓ 自检通过：生成 {len(imgs)} 张图像")
+            log(f"   ✓ {label}通过：生成 {len(imgs)} 张图像")
             for im in imgs[:1]:
                 log(f"     {im.get('filename')}")
             return True
         if status == "error":
-            log(f"   ✗ 自检失败: {str(st.get('error'))[:900]}")
+            log(f"   ✗ {label}失败: {str(st.get('error'))[:900]}")
             dump_log("/content/comfyui.log", 40)
             return False
         cur = f"{status} {st.get('step', '')}/{st.get('total', '')}".strip()
@@ -549,9 +539,89 @@ def self_test(port: int, timeout: float = 1200.0) -> bool:
             log(f"     …{cur}")
             last = cur
 
-    log("   ✗ 自检超时")
+    log(f"   ✗ {label}超时")
     dump_log("/content/comfyui.log", 40)
     return False
+
+
+def self_test(port: int, timeout: float = 1200.0) -> bool:
+    """Text-to-image: proves the sampling graph renders."""
+    return _submit_and_wait(
+        port,
+        {
+            "prompt": "a single red cube on a white table, studio lighting, photorealistic",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "cfg": 1.0,
+            "sampler": "euler",
+            "scheduler": "simple",
+            "seed": 12345,
+            "batch": 1,
+        },
+        timeout,
+        "文生图自检",
+    )
+
+
+# the two reference images used by the official Comfy-Org image-edit template
+EDIT_SAMPLES = [
+    (
+        "portrait_model_denim.png",
+        "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/"
+        "input/portrait_model_denim.png",
+    ),
+    (
+        "clothing_light_blue_denim_shirt.png",
+        "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/"
+        "input/clothing_light_blue_denim_shirt.png",
+    ),
+]
+
+
+def edit_self_test(port: int, timeout: float = 1800.0) -> bool:
+    """Image editing: image_1 is the target, image_2 a reference."""
+    import json as _json
+    import urllib.request
+
+    names: list[str] = []
+    for fname, url in EDIT_SAMPLES:
+        try:
+            with urllib.request.urlopen(url, timeout=90) as r:
+                data = r.read()
+            up = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/upload?filename={fname}",
+                data=data,
+                headers={"Content-Type": "image/png"},
+            )
+            with urllib.request.urlopen(up, timeout=120) as r:
+                names.append(_json.loads(r.read())["name"])
+        except Exception as exc:  # noqa: BLE001
+            log(f"   ✗ 获取示例图失败 {fname}: {exc}")
+            return False
+
+    log(f"   官方示例图已就位: {names}")
+
+    return _submit_and_wait(
+        port,
+        {
+            "prompt": (
+                "Replace the costume of the character in <image1> "
+                "with the clothing shown in <image2>"
+            ),
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "cfg": 1.0,
+            "sampler": "euler",
+            "scheduler": "simple",
+            "seed": 4242,
+            "batch": 1,
+            "images": names,
+        },
+        timeout,
+        "图像编辑自检",
+    )
 
 
 # --------------------------------------------------------------------------
@@ -593,8 +663,11 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         log(f"   诊断失败: {exc}")
 
-    log("\n[自检] 生成一张测试图，验证整条链路（ComfyUI 工作流 + 模型加载）…")
+    log("\n[自检] 文生图：生成一张测试图，验证采样链路…")
     ok = self_test(WEBUI_PORT)
+
+    log("\n[自检] 图像编辑：用官方示例图做一次换装编辑…")
+    edit_ok = edit_self_test(WEBUI_PORT)
 
     log("\n[隧道] 建立公网访问地址…")
     tunnel = start_tunnel(WEBUI_PORT)
@@ -602,11 +675,17 @@ def main() -> None:
 
     log("")
     log("=" * 66)
-    log("✅ 部署完成" if ok else "⚠️ 部署完成，但自检未通过（见上方错误）")
+    if ok and edit_ok:
+        log("✅ 部署完成（文生图 + 图像编辑自检均通过）")
+    elif ok:
+        log("⚠️ 部署完成：文生图正常，图像编辑自检未通过（见上方错误）")
+    else:
+        log("⚠️ 部署完成，但自检未通过（见上方错误）")
     log(f"   模型      : {HF_REPO}")
     log(f"   DiT 量化  : {quant}  ({DIT_BYTES[quant] / 1024 ** 3:.2f} GB)")
     log(f"   文本编码器: {TEXT_ENCODERS[text_encoder]}")
     log(f"   显存      : {vram_gb:.1f} GB")
+    log(f"   图像编辑  : {'可用（最多 10 张参考图）' if edit_ok else '不可用'}")
     log(f"   ComfyUI   : http://127.0.0.1:{COMFY_PORT}")
     log(f"   WebUI     : http://127.0.0.1:{WEBUI_PORT}")
     if tunnel:
