@@ -232,7 +232,7 @@ def make_string_node(info: dict, wf: dict, node_id: str, text: str):
     return [node_id, 0]
 
 
-def build_workflow(req: dict, info: dict) -> dict:
+def build_workflow(req: dict, info: dict, prefer_modern: bool = True) -> dict:
     """Assemble a text-to-image graph for Qwen-Image-2.1 (GGUF)."""
     width = int(req.get("width", 1024))
     height = int(req.get("height", 1024))
@@ -291,7 +291,7 @@ def build_workflow(req: dict, info: dict) -> dict:
     # --- conditioning + sampling -----------------------------------------
     # Qwen-Image-2.1 ships a dedicated encoder node that returns both
     # conditionings at once; older ComfyUI builds only have CLIPTextEncode.
-    if "TextEncodeQwenImage21" in info:
+    if prefer_modern and "TextEncodeQwenImage21" in info:
         links = {"clip": ["2", 0], "vae": ["3", 0]}
         overrides: dict[str, Any] = {}
         pos_ref = make_string_node(info, wf, "6", prompt)
@@ -441,15 +441,38 @@ async def api_generate(request: Request) -> JSONResponse:
 
     try:
         info = object_info()
-        wf = build_workflow(req, info)
-        res = comfy_post("/prompt", {"prompt": wf, "client_id": "qwen21-webui"})
-    except httpx.HTTPStatusError as exc:
-        detail = exc.response.text[:2000]
-        return JSONResponse(
-            {"error": f"ComfyUI 拒绝了工作流: {detail}"}, status_code=502
-        )
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
+
+    # ComfyUI ships a dedicated Qwen-Image-2.1 text-encoder node, but its
+    # schema has changed between versions. Try it first, then fall back to the
+    # generic CLIPTextEncode graph rather than failing the whole request.
+    errors: list[str] = []
+    res = None
+    for prefer_modern in (True, False):
+        try:
+            wf = build_workflow(req, info, prefer_modern=prefer_modern)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"构建工作流失败: {type(exc).__name__}: {exc}")
+            break
+
+        r = http.post(
+            f"{COMFY_URL}/prompt", json={"prompt": wf, "client_id": "qwen21-webui"}
+        )
+        if r.status_code == 200:
+            res = r.json()
+            break
+
+        body = r.text[:1500]
+        label = "TextEncodeQwenImage21" if prefer_modern else "CLIPTextEncode"
+        errors.append(f"[{label}] HTTP {r.status_code} {body}")
+        if not prefer_modern or "TextEncodeQwenImage21" not in body:
+            break
+
+    if res is None:
+        return JSONResponse(
+            {"error": "ComfyUI 拒绝了工作流: " + " || ".join(errors)}, status_code=502
+        )
 
     pid = res.get("prompt_id")
     with PROGRESS_LOCK:
