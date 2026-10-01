@@ -25,6 +25,9 @@
     file: $("file"),
     refs: $("refs"),
     editTag: $("edit-tag"),
+    resolution: $("resolution"),
+    resolutionVal: $("resolution-val"),
+    maxSide: $("max-side"),
 
     presets: $("presets"),
     width: $("width"),
@@ -154,6 +157,14 @@
         : "当前 ComfyUI 缺少 TextEncodeQwenImage21 节点，只能文生图";
     }
 
+    if (cfg.max_upload_side) {
+      if (els.maxSide) els.maxSide.textContent = cfg.max_upload_side;
+      if (els.resolution) els.resolution.max = String(cfg.max_upload_side);
+    }
+    if (cfg.downscale_on_upload === false) {
+      log("注意：服务端没有 Pillow，上传图片不会自动缩放。", "w");
+    }
+
     if (cfg.gpu_name) {
       els.vram.textContent =
         (cfg.vram_free_gb != null ? cfg.vram_free_gb.toFixed(1) : "?") + " / " +
@@ -248,6 +259,15 @@
       idx.className = "idx" + (i === 0 ? " target" : "");
       idx.textContent = "image" + (i + 1);
 
+      const dim = document.createElement("span");
+      dim.className = "dim" + (r.resized ? " shrunk" : "");
+      if (r.width && r.height) {
+        dim.textContent = r.width + "×" + r.height;
+        dim.title = r.resized
+          ? "原图 " + r.originalWidth + "×" + r.originalHeight + "，已等比缩放到长边 " + (cfg.max_upload_side || 2048)
+          : "原始分辨率，未缩放";
+      }
+
       const del = document.createElement("button");
       del.type = "button";
       del.className = "del";
@@ -259,7 +279,7 @@
         renderRefs();
       });
 
-      card.append(img, idx, del);
+      card.append(img, idx, dim, del);
       els.refs.appendChild(card);
     });
   }
@@ -281,8 +301,19 @@
         });
         const j = await r.json();
         if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
-        REFS.push({ name: j.name, url: j.url });
-        log("已上传参考图 " + j.name, "i");
+        REFS.push({
+          name: j.name,
+          url: j.url,
+          width: j.width,
+          height: j.height,
+          originalWidth: j.original_width,
+          originalHeight: j.original_height,
+          resized: !!j.resized,
+        });
+        log(
+          j.message ? "已上传 " + j.name + " · " + j.message : "已上传参考图 " + j.name,
+          j.resized ? "w" : "i",
+        );
       } catch (e) {
         log("上传失败 " + f.name + "：" + e.message, "e");
         showBanner("上传失败：" + e.message);
@@ -340,6 +371,7 @@
       seed,
       batch: Number(els.batch.value) || 1,
       images: REFS.map((r) => r.name),
+      resolution: Number(els.resolution.value),
     };
 
     setBusy(true);
@@ -463,6 +495,11 @@
 
     els.batch.addEventListener("input", () => {
       els.batchVal.textContent = els.batch.value;
+    });
+
+    els.resolution.addEventListener("input", () => {
+      const v = Number(els.resolution.value);
+      els.resolutionVal.textContent = v === 0 ? "原始尺寸" : v;
     });
     els.steps.addEventListener("input", () => {
       els.stepsVal.textContent = els.steps.value;
