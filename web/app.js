@@ -31,6 +31,9 @@
     presets: $("presets"),
     width: $("width"),
     height: $("height"),
+    customSize: $("custom-size"),
+    sizeTag: $("size-tag"),
+    sizeNote: $("size-note"),
     batch: $("batch"),
     batchVal: $("batch-val"),
 
@@ -283,6 +286,7 @@
       card.append(img, idx, dim, del);
       els.refs.appendChild(card);
     });
+    updateSizeUI();
   }
 
   async function addFiles(files) {
@@ -347,6 +351,87 @@
     });
   }
 
+  /* ------------------------------ output size -------------------------- */
+
+  const round32 = (v) => Math.max(32, Math.round(v / 32) * 32);
+
+  // Mirrors TextEncodeQwenImage21.execute() so the UI can state the real output
+  // size instead of leaving it a mystery:
+  //   width  = round(sqrt(res^2 * ratio) / 32) * 32
+  //   height = round(sqrt(res^2 / ratio) / 32) * 32
+  function computeOutputSize() {
+    const editing = REFS.length > 0;
+    const custom = els.customSize.checked;
+
+    if (!editing || custom) {
+      return {
+        auto: false,
+        w: Number(els.width.value) || 1024,
+        h: Number(els.height.value) || 1024,
+      };
+    }
+
+    const first = REFS[0];
+    if (!first || !first.width || !first.height) return null;
+
+    const res = Number(els.resolution.value);
+    if (res <= 0) {
+      // resolution 0 keeps each reference at its own size, rounded to 32
+      return { auto: true, w: round32(first.width), h: round32(first.height) };
+    }
+    const ratio = first.width / first.height;
+    return {
+      auto: true,
+      w: round32(Math.sqrt(res * res * ratio)),
+      h: round32(Math.sqrt((res * res) / ratio)),
+    };
+  }
+
+  function updateSizeUI() {
+    const editing = REFS.length > 0;
+    const custom = els.customSize.checked;
+    const follows = editing && !custom;   // canvas derived from image_1
+
+    els.width.disabled = follows;
+    els.height.disabled = follows;
+    [...els.presets.children].forEach((b) => {
+      b.disabled = follows;
+    });
+
+    const size = computeOutputSize();
+    const shown = size ? size.w + "×" + size.h : "—";
+
+    if (els.sizeTag) {
+      els.sizeTag.textContent = follows ? "跟随参考图" : "自定义";
+      els.sizeTag.className = "tag" + (follows ? "" : " on");
+    }
+    if (!els.sizeNote) return;
+
+    if (!editing) {
+      els.sizeNote.innerHTML =
+        "文生图：宽高直接生效，输出 <b>" + shown + "</b>。";
+      return;
+    }
+    if (custom) {
+      els.sizeNote.innerHTML =
+        "自定义画布 <b>" + shown + "</b>，宽高与预设直接生效。与 <code>image1</code> " +
+        "比例差太多时编辑会偏移，建议贴近参考图尺寸。";
+      return;
+    }
+
+    els.sizeNote.innerHTML =
+      "画布跟随 <code>image1</code> 的比例、按「参考图分辨率」的像素预算换算 → 输出 <b>" +
+      shown + "</b>。<br>此时<b>宽高与预设不生效</b>；要精确控制尺寸请勾选「自定义输出尺寸」。";
+
+    const first = REFS[0];
+    if (size && first.width && size.w < first.width * 0.8) {
+      els.sizeNote.innerHTML +=
+        '<br><span style="color:var(--warn)">⚠ 参考图是 ' + first.width + "×" + first.height +
+        "，当前预算只输出 " + shown + "。想按更大尺寸出图，把「参考图分辨率」提到 " +
+        Math.max(size.w, size.h) + " 以上，或勾选「自定义输出尺寸」直接填宽高。</span>";
+    }
+  }
+
   /* ------------------------------ generate ----------------------------- */
 
   async function generate() {
@@ -373,14 +458,18 @@
       batch: Number(els.batch.value) || 1,
       images: REFS.map((r) => r.name),
       resolution: Number(els.resolution.value),
+      custom_size: els.customSize.checked,
     };
+
+    const outSize = computeOutputSize() || { w: payload.width, h: payload.height };
 
     setBusy(true);
     setProgress(3, "已提交", "");
     const holders = addPending(payload.batch);
     log(
       (payload.images.length ? "编辑" : "文生图") +
-        " · " + payload.width + "×" + payload.height +
+        " · " + outSize.w + "×" + outSize.h +
+        (payload.images.length && !payload.custom_size ? "（跟随 image1）" : "") +
         " · " + payload.steps + "步 · seed " + seed +
         (payload.images.length ? " · " + payload.images.length + " 张参考图" : ""),
       "i",
@@ -482,6 +571,7 @@
         els.height.value = p.h;
         [...els.presets.children].forEach((c) => c.classList.remove("active"));
         b.classList.add("active");
+        updateSizeUI();
       });
       els.presets.appendChild(b);
     });
@@ -501,7 +591,11 @@
     els.resolution.addEventListener("input", () => {
       const v = Number(els.resolution.value);
       els.resolutionVal.textContent = v === 0 ? "原始尺寸" : v;
+      updateSizeUI();
     });
+
+    els.customSize.addEventListener("change", updateSizeUI);
+    [els.width, els.height].forEach((el) => el.addEventListener("input", updateSizeUI));
     els.steps.addEventListener("input", () => {
       els.stepsVal.textContent = els.steps.value;
     });
@@ -548,6 +642,7 @@
     wire();
     log("WebUI 已加载，前端资源来自 GitHub。", "s");
     await loadConfig();
+    updateSizeUI();
     await loadHistory();
     setInterval(loadConfig, 15000);
   }
