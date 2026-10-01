@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -137,21 +138,29 @@ def choose_plan(gpu_name: str, vram_gb: float) -> tuple[str, str]:
 def install_comfyui() -> None:
     if not COMFY_DIR.exists():
         log("\n[1/5] 克隆 ComfyUI…")
-        sh(f"git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git {COMFY_DIR}")
+        sh(f"git clone --depth 1 https://github.com/Comfy-Org/ComfyUI.git {COMFY_DIR}")
     else:
         log("\n[1/5] ComfyUI 已存在，跳过克隆")
 
     log("[1/5] 安装 ComfyUI 依赖（保留 Colab 自带的 torch）…")
     req = COMFY_DIR / "requirements.txt"
     if req.exists():
-        keep = [
-            ln
-            for ln in req.read_text().splitlines()
-            if ln.strip()
-            and not ln.lower().startswith(("torch", "torchvision", "torchaudio"))
-        ]
+        # Colab already ships the three CUDA torch packages, so skip exactly
+        # those. Match the distribution name precisely: `torchsde` (a real
+        # ComfyUI dependency) merely shares the "torch" prefix and must be
+        # installed, otherwise ComfyUI dies on import.
+        skip = {"torch", "torchvision", "torchaudio"}
+        keep = []
+        for line in req.read_text().splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            pkg = re.split(r"[<>=!~\[\s;]", s, 1)[0].strip().lower()
+            if pkg not in skip:
+                keep.append(s)
         tmp = Path("/tmp/comfy-req.txt")
         tmp.write_text("\n".join(keep))
+        log(f"   ↳ {len(keep)} 个依赖（跳过 Colab 自带的 {', '.join(sorted(skip))}）")
         sh(f"{sys.executable} -m pip install -q -r {tmp}")
 
     nodes = COMFY_DIR / "custom_nodes"
@@ -226,12 +235,16 @@ def download_models(quant: str, text_encoder: str) -> None:
 # 4. services
 # --------------------------------------------------------------------------
 
-def wait_for(url: str, timeout: float = 300.0, name: str = "service") -> bool:
+def wait_for(url: str, timeout: float = 300.0, name: str = "service", proc=None) -> bool:
+    """Poll a URL until it answers, bailing out early if the process died."""
     import urllib.error
     import urllib.request
 
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            log(f"✗ {name} 进程已退出（returncode={proc.returncode}），不再等待")
+            return False
         try:
             with urllib.request.urlopen(url, timeout=5) as r:
                 if r.status == 200:
@@ -242,23 +255,34 @@ def wait_for(url: str, timeout: float = 300.0, name: str = "service") -> bool:
     return False
 
 
+def dump_log(path: str, lines: int = 60) -> None:
+    log(f"—— {path} 末尾 {lines} 行 ——")
+    try:
+        out = subprocess.run(
+            f"tail -n {lines} {path}", shell=True, capture_output=True, text=True
+        ).stdout
+        log(out or "(空)")
+    except Exception as exc:  # noqa: BLE001
+        log(f"(无法读取日志: {exc})")
+
+
 def start_comfyui(lowvram: bool = False) -> subprocess.Popen:
     log("\n[4/5] 启动 ComfyUI…")
     logfile = open("/content/comfyui.log", "w")
     extra = " --lowvram" if lowvram else ""
     cmd = (
         f"{sys.executable} main.py --listen 127.0.0.1 --port {COMFY_PORT} "
-        f"--disable-auto-launch --dont-print-server{extra}"
+        f"--disable-auto-launch{extra}"
     )
+    log(f"   $ {cmd}")
     proc = subprocess.Popen(
         cmd, shell=True, cwd=str(COMFY_DIR), stdout=logfile, stderr=subprocess.STDOUT
     )
-    if not wait_for(f"http://127.0.0.1:{COMFY_PORT}/system_stats", 420, "ComfyUI"):
-        log("—— ComfyUI 日志尾部 ——")
-        log(subprocess.run(
-            "tail -n 40 /content/comfyui.log", shell=True, capture_output=True, text=True
-        ).stdout)
-        raise RuntimeError("ComfyUI 启动失败")
+    if not wait_for(
+        f"http://127.0.0.1:{COMFY_PORT}/system_stats", 420, "ComfyUI", proc=proc
+    ):
+        dump_log("/content/comfyui.log", 60)
+        raise RuntimeError("ComfyUI 启动失败，详见上方 /content/comfyui.log 末尾")
     log("✓ ComfyUI 已就绪")
     return proc
 
@@ -287,11 +311,11 @@ def start_webui(quant: str, text_encoder: str) -> subprocess.Popen:
         env=env,
         cwd="/content",
     )
-    if not wait_for(f"http://127.0.0.1:{WEBUI_PORT}/api/config", 180, "WebUI"):
-        log(subprocess.run(
-            "tail -n 40 /content/webui.log", shell=True, capture_output=True, text=True
-        ).stdout)
-        raise RuntimeError("WebUI 启动失败")
+    if not wait_for(
+        f"http://127.0.0.1:{WEBUI_PORT}/api/config", 180, "WebUI", proc=proc
+    ):
+        dump_log("/content/webui.log", 40)
+        raise RuntimeError("WebUI 启动失败，详见上方 /content/webui.log 末尾")
     log("✓ WebUI 已就绪")
     return proc
 
