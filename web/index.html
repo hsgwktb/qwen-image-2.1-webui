@@ -85,8 +85,9 @@
             <label class="lbl" for="resolution">参考图分辨率<span class="val" id="resolution-val">原始尺寸</span></label>
             <input type="range" id="resolution" min="0" max="4096" step="32" value="0">
             <div class="drop-note" style="margin-top:6px">
-              <code>0</code> = 保持上传时的原始分辨率（与图片一致）。设为非 0 时，模型会把参考图
-              缩放到约 <code>resolution × resolution</code> 像素（保持比例），模型原生支持到 2048。
+              <code>0</code> = 沿用 <code>image1</code> 的尺寸（对齐到 32 的倍数，例如 2160 → 2176）。
+              设为非 0 时按「总像素预算」换算：长边 ≈ <code>resolution</code> × 参考图长宽比。
+              这是编辑模式的<strong>自动画布</strong>；要精确指定宽高，请到「尺寸」勾选「自定义输出尺寸」。
             </div>
           </div>
 
@@ -99,18 +100,28 @@
       </div>
 
       <div class="panel">
-        <div class="panel-head">尺寸</div>
+        <div class="panel-head">
+          尺寸
+          <span class="spacer"></span>
+          <span class="tag" id="size-tag">—</span>
+        </div>
         <div class="panel-body">
-          <div class="presets" id="presets"></div>
+          <label class="switch" for="custom-size">
+            <input type="checkbox" id="custom-size">
+            <span>自定义输出尺寸</span>
+          </label>
+          <div class="drop-note" id="size-note"></div>
+
+          <div class="presets" id="presets" style="margin-top:12px"></div>
           <div class="field" style="margin-top:12px">
             <div class="row2">
               <div>
                 <label class="lbl" for="width">宽</label>
-                <input type="number" id="width" value="1024" min="256" max="2048" step="32">
+                <input type="number" id="width" value="1024" min="256" max="4096" step="32">
               </div>
               <div>
                 <label class="lbl" for="height">高</label>
-                <input type="number" id="height" value="1024" min="256" max="2048" step="32">
+                <input type="number" id="height" value="1024" min="256" max="4096" step="32">
               </div>
             </div>
           </div>
