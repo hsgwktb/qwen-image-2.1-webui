@@ -607,7 +607,11 @@ def edit_self_test(port: int, timeout: float = 1800.0) -> bool:
                 headers={"Content-Type": "image/png"},
             )
             with urllib.request.urlopen(up, timeout=120) as r:
-                names.append(_json.loads(r.read())["name"])
+                meta = _json.loads(r.read())
+            names.append(meta["name"])
+            size = f"{meta.get('width')}×{meta.get('height')}"
+            note = "（已等比缩放）" if meta.get("resized") else "（原始分辨率）"
+            log(f"   ↳ {fname}: {size}{note}")
         except Exception as exc:  # noqa: BLE001
             log(f"   ✗ 获取示例图失败 {fname}: {exc}")
             return False
