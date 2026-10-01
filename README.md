@@ -67,8 +67,27 @@ Qwen-Image-2.1 的编辑能力用的是**同一套权重** —— 不需要额�
 - 编辑时画布取自 image_1 的 latent（`KSampler.latent_image` 接编码节点的第三个输出），
   而不是空白 latent
 
-张量合并走 `BatchImagesNode`（官方模板用的节点）；如果该版本 ComfyUI 没有，会自动回退到
-经典的两输入 `ImageBatch`。当前选用了哪个能在 `/api/config` 的 `image_batch_node` 字段看到。
+### 上传时的自动缩放
+
+服务端在写入 ComfyUI 的 `input/` 之前会做一次等比缩放：
+
+| 原图 | 结果 |
+| --- | --- |
+| 长边 > 2048（如 4096×3072） | 等比缩到长边 2048（→ 2048×1536） |
+| 长边 ≤ 2048（如 2048×500、1024×768） | **原字节原样保留**，不重编码 |
+
+阈值可用 `MAX_UPLOAD_SIDE` 环境变量调整（默认 2048）；缩放在 `/api/upload` 里做，
+所以不管用什么客户端上传都生效。前端会在缩略图右下角标出最终尺寸，被缩过的用琥珀色高亮，
+并在日志里写明「原图 4096×3072 → 2048×1536」。PNG 的 alpha 通道会保留。
+
+> 注意：`resolution` 滑块控制的是**模型再采样**的尺寸。默认 1024 表示模型会把参考图压到
+> 约 1024×1024。想让上传的 2048 真正生效，把滑块拉到 **2048**，或设为 **0**（保持上传尺寸）。
+
+参考图**不是**合并成一个张量再喂进去的。`TextEncodeQwenImage21` 的 `images` 是
+**Autogrow 输入**（实机 `/object_info` 里类型为 `COMFY_AUTOGROW_V3`）：节点收到的是一份以
+`image_1`…`image_16` 为键的字典，所以工作流里必须写成点号键 `images.image_1`、`images.image_2`…
+传批处理张量会让节点内部的 `images or {}` 抛
+`Boolean value of Tensor with more than one value is ambiguous`。
 
 上游还有一个**可选的提示词增强器**（`qwen3.5_9b_qwen_image_2.1_pe_i2i`，8.82 GB），
 用 Qwen3.5 把「换衣服」这类短指令改写成完整描述再交给编辑模型，效果更好但要额外下载权重，
