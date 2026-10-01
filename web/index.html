@@ -66,6 +66,28 @@
       </div>
 
       <div class="panel">
+        <div class="panel-head">
+          参考图 · 图像编辑
+          <span class="spacer"></span>
+          <span class="tag" id="edit-tag">检测中…</span>
+        </div>
+        <div class="panel-body">
+          <div class="drop" id="drop">
+            <input type="file" id="file" accept="image/*" multiple hidden>
+            <div class="drop-icon">🖼</div>
+            <div class="drop-main">拖拽图片到此处，或 <span class="link">点击选择</span></div>
+            <div class="drop-sub">最多 10 张 · 第 1 张是<b>编辑目标</b>，其余为参考图</div>
+          </div>
+          <div class="refs" id="refs"></div>
+          <div class="drop-note" id="edit-note">
+            在提示词里用 <code>&lt;image1&gt;</code>、<code>&lt;image2&gt;</code> 引用它们，
+            例如「把 <code>&lt;image1&gt;</code> 的衣服换成 <code>&lt;image2&gt;</code> 的款式」。
+            留空则回到纯文生图。
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
         <div class="panel-head">尺寸</div>
         <div class="panel-body">
           <div class="presets" id="presets"></div>
