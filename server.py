@@ -179,6 +179,24 @@ def pick(info: dict, *candidates: str) -> str:
     raise RuntimeError("ComfyUI 缺少以下节点之一: " + ", ".join(candidates))
 
 
+def make_string_node(info: dict, wf: dict, node_id: str, text: str):
+    """
+    Create a string-primitive node, discovering its input name from the live
+    schema (ComfyUI has shipped this as both `value` and `text`). Returns a link
+    reference, or None when the node type is unavailable.
+    """
+    cls = "PrimitiveStringMultiline"
+    if cls not in info:
+        return None
+    schema = info[cls].get("input", {})
+    names = list((schema.get("required") or {}).keys()) + list((schema.get("optional") or {}).keys())
+    if not names:
+        return None
+    name = "value" if "value" in names else names[0]
+    wf[node_id] = {"class_type": cls, "inputs": {name: text}}
+    return [node_id, 0]
+
+
 def build_workflow(req: dict, info: dict) -> dict:
     """Assemble a text-to-image graph for Qwen-Image-2.1 (GGUF)."""
     width = int(req.get("width", 1024))
@@ -228,12 +246,13 @@ def build_workflow(req: dict, info: dict) -> dict:
     if "TextEncodeQwenImage21" in info:
         links = {"clip": ["2", 0], "vae": ["3", 0]}
         overrides: dict[str, Any] = {}
-        if "PrimitiveStringMultiline" in info:
-            wf["6"] = {"class_type": "PrimitiveStringMultiline", "inputs": {"value": prompt}}
-            wf["7"] = {"class_type": "PrimitiveStringMultiline", "inputs": {"value": negative}}
-            links["prompt"] = ["6", 0]
-            links["negative_prompt"] = ["7", 0]
+        pos_ref = make_string_node(info, wf, "6", prompt)
+        neg_ref = make_string_node(info, wf, "7", negative)
+        if pos_ref and neg_ref:
+            links["prompt"] = pos_ref
+            links["negative_prompt"] = neg_ref
         else:
+            # no string-primitive node: feed the literals straight in
             overrides["prompt"] = prompt
             overrides["negative_prompt"] = negative
         wf["5"] = make_node("TextEncodeQwenImage21", info, links, overrides)
