@@ -456,6 +456,18 @@ def diagnose(info: dict) -> None:
         req = (info["TextEncodeQwenImage21"].get("input", {}).get("required", {}) or {})
         log(f"   TextEncodeQwenImage21 必填输入: {list(req.keys())}")
 
+    # dump the exact input names/types for the nodes involved in image editing
+    for cls in ("TextEncodeQwenImage21", "BatchImagesNode", "ImageBatch", "LoadImage"):
+        if cls not in info:
+            continue
+        spec = info[cls].get("input", {})
+        for section in ("required", "optional"):
+            for name, definition in (spec.get(section) or {}).items():
+                kind = definition[0] if isinstance(definition, list) and definition else None
+                if isinstance(kind, list):
+                    kind = f"combo[{len(kind)}]"
+                log(f"   {cls}.{name} ({section}): {kind}")
+
     # what does ComfyUI actually see on disk for the GGUF loader?
     for cls in ("UnetLoaderGGUF", "UNETLoader"):
         if cls not in info:
