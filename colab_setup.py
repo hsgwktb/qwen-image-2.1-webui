@@ -398,6 +398,66 @@ def start_tunnel(port: int) -> str | None:
 
 
 # --------------------------------------------------------------------------
+# diagnostics — ComfyUI rejects a workflow with a terse validation error, so
+# report exactly which nodes/files the running server actually exposes.
+# --------------------------------------------------------------------------
+
+def diagnose(info: dict) -> None:
+    import urllib.request
+
+    for cls in (
+        "UnetLoaderGGUF",
+        "UnetLoaderGGUFAdvanced",
+        "UNETLoader",
+        "TextEncodeQwenImage21",
+        "CLIPTextEncode",
+        "EmptyLatentImage",
+        "EmptySD3LatentImage",
+        "PrimitiveStringMultiline",
+        "KSampler",
+        "VAELoader",
+        "CLIPLoader",
+    ):
+        log(f"   节点 {cls:26s}: {'有' if cls in info else '缺失'}")
+
+    def opts(cls: str, field: str):
+        spec = (info.get(cls, {}).get("input", {}).get("required", {}) or {}).get(field)
+        if isinstance(spec, list) and spec and isinstance(spec[0], list):
+            return spec[0]
+        return None
+
+    te_types = opts("CLIPLoader", "type")
+    if te_types:
+        log(f"   CLIPLoader.type 支持: {te_types}")
+
+    if "TextEncodeQwenImage21" in info:
+        req = (info["TextEncodeQwenImage21"].get("input", {}).get("required", {}) or {})
+        log(f"   TextEncodeQwenImage21 必填输入: {list(req.keys())}")
+
+    # what does ComfyUI actually see on disk for the GGUF loader?
+    for cls in ("UnetLoaderGGUF", "UNETLoader"):
+        if cls not in info:
+            continue
+        for field in ("unet_name", "ckpt_name"):
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{COMFY_PORT}/object_info/{cls}", timeout=30
+                ) as r:
+                    d = json.loads(r.read())
+                names = (
+                    d.get(cls, {})
+                    .get("input", {})
+                    .get("required", {})
+                    .get(field, [[None]])[0]
+                )
+                if isinstance(names, list):
+                    log(f"   {cls}.{field} 可选 ({len(names)}): {names[:8]}")
+                break
+            except Exception:  # noqa: BLE001
+                continue
+
+
+# --------------------------------------------------------------------------
 # self-test — proves the whole ComfyUI graph actually renders an image
 # --------------------------------------------------------------------------
 
@@ -426,8 +486,13 @@ def self_test(port: int, timeout: float = 1200.0) -> bool:
         with urllib.request.urlopen(req, timeout=60) as r:
             res = _json.loads(r.read())
     except urllib.error.HTTPError as exc:
-        body = exc.read()[:800].decode("utf-8", "replace")
-        log(f"   ✗ 自检提交失败 HTTP {exc.code}: {body}")
+        body = exc.read().decode("utf-8", "replace")
+        log(f"   ✗ 自检提交失败 HTTP {exc.code}")
+        log("   —— ComfyUI 完整报错 ——")
+        # wrap so the notebook output does not clip long lines
+        for i in range(0, min(len(body), 3000), 110):
+            log("     " + body[i : i + 110])
+        dump_log("/content/comfyui.log", 40)
         return False
     except Exception as exc:  # noqa: BLE001
         log(f"   ✗ 自检提交失败: {exc}")
@@ -495,6 +560,17 @@ def main() -> None:
     fetch_webui_code()
     start_comfyui(lowvram=bool(vram_gb and vram_gb < 12))
     start_webui(quant, text_encoder)
+
+    log("\n[诊断] 检查 ComfyUI 实际暴露的节点与模型文件…")
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{COMFY_PORT}/object_info", timeout=120
+        ) as r:
+            diagnose(json.loads(r.read()))
+    except Exception as exc:  # noqa: BLE001
+        log(f"   诊断失败: {exc}")
 
     log("\n[自检] 生成一张测试图，验证整条链路（ComfyUI 工作流 + 模型加载）…")
     ok = self_test(WEBUI_PORT)
