@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qwen-Image-2.1 Uncensored — WebUI</title>
+<!--
+  All styling and behaviour for this page lives in the GitHub repository and is
+  pulled in at runtime. Nothing is inlined and nothing is base64-embedded.
+
+    /assets/style.css  ->  <repo>/web/style.css
+    /assets/app.js     ->  <repo>/web/app.js
+
+  In the default ASSET_SOURCE=proxy mode server.py fetches those two files from
+  the GitHub raw endpoint and re-serves them on this origin, so the page works
+  even on networks where raw.githubusercontent.com is unreachable. Running the
+  server with ASSET_SOURCE=github swaps the hrefs below for direct GitHub URLs.
+-->
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="mark"></div>
+      <div>
+        <h1>Qwen-Image-2.1 Uncensored</h1>
+        <div class="sub">GGUF · ComfyUI backend · Colab</div>
+      </div>
+    </div>
+
+    <div class="spacer"></div>
+
+    <span class="chip" id="chip-gpu"><span class="dot" id="dot-status"></span><span id="txt-status">连接中…</span></span>
+    <span class="chip">显存 <b id="txt-vram">—</b></span>
+    <span class="chip">DiT <b id="txt-quant">—</b></span>
+    <span class="chip">TE <b id="txt-te">—</b></span>
+  </header>
+
+  <div class="banner" id="banner">
+    <span>⚠</span>
+    <span id="banner-text"></span>
+  </div>
+
+  <div class="wrap">
+
+    <!-- ============ controls ============ -->
+    <section>
+      <div class="panel">
+        <div class="panel-head">提示词</div>
+        <div class="panel-body">
+
+          <div class="field">
+            <label class="lbl" for="prompt">Prompt<span class="val" id="prompt-len">0</span></label>
+            <textarea id="prompt" class="pos" placeholder="描述你想生成的画面…"></textarea>
+          </div>
+
+          <div class="field">
+            <label class="lbl" for="negative">Negative prompt</label>
+            <textarea id="negative" class="neg" placeholder="留空使用默认"></textarea>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">尺寸</div>
+        <div class="panel-body">
+          <div class="presets" id="presets"></div>
+          <div class="field" style="margin-top:12px">
+            <div class="row2">
+              <div>
+                <label class="lbl" for="width">宽</label>
+                <input type="number" id="width" value="1024" min="256" max="2048" step="32">
+              </div>
+              <div>
+                <label class="lbl" for="height">高</label>
+                <input type="number" id="height" value="1024" min="256" max="2048" step="32">
+              </div>
+            </div>
+          </div>
+          <div class="field">
+            <label class="lbl" for="batch">数量<span class="val" id="batch-val">1</span></label>
+            <input type="range" id="batch" min="1" max="4" step="1" value="1">
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">采样</div>
+        <div class="panel-body">
+          <div class="field">
+            <label class="lbl" for="steps">步数<span class="val" id="steps-val">25</span></label>
+            <input type="range" id="steps" min="1" max="60" step="1" value="25">
+          </div>
+          <div class="field">
+            <label class="lbl" for="cfg">CFG<span class="val" id="cfg-val">1.0</span></label>
+            <input type="range" id="cfg" min="0" max="10" step="0.1" value="1">
+          </div>
+          <div class="field row2">
+            <div>
+              <label class="lbl" for="sampler">采样器</label>
+              <select id="sampler">
+                <option value="euler" selected>euler</option>
+                <option value="euler_ancestral">euler_ancestral</option>
+                <option value="dpmpp_2m">dpmpp_2m</option>
+                <option value="dpmpp_2m_sde">dpmpp_2m_sde</option>
+                <option value="res_multistep">res_multistep</option>
+              </select>
+            </div>
+            <div>
+              <label class="lbl" for="scheduler">调度器</label>
+              <select id="scheduler">
+                <option value="simple" selected>simple</option>
+                <option value="normal">normal</option>
+                <option value="beta">beta</option>
+                <option value="sgm_uniform">sgm_uniform</option>
+                <option value="karras">karras</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label class="lbl" for="seed">种子<span class="val" id="seed-val">随机</span></label>
+            <div class="row2">
+              <input type="number" id="seed" value="-1" step="1">
+              <button class="btn ghost" id="btn-rand" type="button">🎲 随机</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-body">
+          <div class="btn-row">
+            <button class="btn primary" id="btn-gen" type="button">
+              <span class="spin"></span><span id="btn-gen-label">生成</span>
+            </button>
+            <button class="btn danger" id="btn-stop" type="button" disabled>中断</button>
+          </div>
+          <div class="progress-wrap">
+            <div class="progress"><i id="bar"></i></div>
+            <div class="progress-meta">
+              <span id="prog-left">空闲</span>
+              <span id="prog-right"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">运行日志</div>
+        <div class="panel-body">
+          <div class="log" id="log"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ output ============ -->
+    <section>
+      <div class="panel">
+        <div class="gallery-head">
+          <h2>结果</h2>
+          <span class="chip" id="chip-count">0 张</span>
+          <div class="spacer"></div>
+          <button class="btn ghost" id="btn-clear" type="button" style="width:auto;padding:5px 11px;font-size:12px">清空</button>
+        </div>
+        <div class="gallery" id="gallery">
+          <div class="empty" id="empty">
+            <div class="big">🎨</div>
+            <div>还没有生成结果</div>
+            <div>填写提示词后点击 <code>生成</code></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <div class="foot">
+    前端资源来自 GitHub 仓库 · <code id="asset-src">—</code>
+  </div>
+
+</div>
+
+<script src="/assets/app.js" defer></script>
+</body>
+</html>
