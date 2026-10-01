@@ -572,3 +572,32 @@ input[type="range"]::-moz-range-thumb {
   padding: 1px 4px;
   border-radius: 4px;
 }
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+.switch input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.switch.warn span { color: var(--warn); }
+
+/* width/height are ignored while the canvas follows the reference image */
+input[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.preset[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
