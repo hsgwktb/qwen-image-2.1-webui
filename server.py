@@ -140,25 +140,19 @@ def gpu_snapshot() -> dict:
     return info
 
 
-_EDIT_CAP: dict[str, Any] = {"value": None, "batch": None, "ts": 0.0}
-
-
-def editing_capabilities() -> tuple[bool, str | None]:
-    """(encode node present?, node used to merge several references)."""
-    now = time.time()
-    if _EDIT_CAP["value"] is None or now - _EDIT_CAP["ts"] > 300:
-        try:
-            info = object_info()
-            _EDIT_CAP["value"] = "TextEncodeQwenImage21" in info
-            _EDIT_CAP["batch"] = image_batch_class(info)
-            _EDIT_CAP["ts"] = now
-        except Exception:  # noqa: BLE001
-            return False, None
-    return bool(_EDIT_CAP["value"]), _EDIT_CAP["batch"]
+_EDIT_CAP: dict[str, Any] = {"value": None, "ts": 0.0}
 
 
 def editing_available() -> bool:
-    return editing_capabilities()[0]
+    """Whether the running ComfyUI exposes the Qwen-Image 2.1 encode node."""
+    now = time.time()
+    if _EDIT_CAP["value"] is None or now - _EDIT_CAP["ts"] > 300:
+        try:
+            _EDIT_CAP["value"] = "TextEncodeQwenImage21" in object_info()
+            _EDIT_CAP["ts"] = now
+        except Exception:  # noqa: BLE001
+            return False
+    return bool(_EDIT_CAP["value"])
 
 
 # --------------------------------------------------------------------------
@@ -222,22 +216,6 @@ def make_node(class_type: str, info: dict, links: dict, overrides: dict) -> dict
                 if dflt is not None:
                     inputs[name] = dflt
     return {"class_type": class_type, "inputs": inputs}
-
-
-def image_batch_class(info: dict) -> str | None:
-    """
-    Node used to merge several reference images into the single batched IMAGE
-    that TextEncodeQwenImage21 expects.
-
-    ImageBatch (plain image1/image2, and it rescales image2 to match image1) is
-    preferred because its contract is unambiguous. BatchImagesNode is the node
-    the official template uses, but it takes a variable list of dotted inputs
-    whose exact names differ between builds.
-    """
-    for c in ("ImageBatch", "ImageBatchMulti", "BatchImagesNode"):
-        if c in info:
-            return c
-    return None
 
 
 def pick(info: dict, *candidates: str) -> str:
@@ -379,49 +357,23 @@ def build_workflow(req: dict, info: dict, prefer_modern: bool = True) -> dict:
             overrides["negative_prompt"] = negative
 
         # image_1 is the edit target, image_2..10 are references.
+        #
+        # `images` is an Autogrow input: object_info exposes only the single key
+        # "images", but the node's execute() receives a dict keyed image_1 ..
+        # image_16 and does `images or {}`. So the prompt has to carry dotted
+        # keys, patched in after make_node (which filters to declared names).
+        # Handing it a batched tensor instead makes that `or` raise
+        # "Boolean value of Tensor with more than one value is ambiguous".
         load_refs: list[Any] = []
         for idx, name in enumerate(images, start=1):
             nid = str(30 + idx)
             wf[nid] = make_node("LoadImage", info, {}, {"image": name})
             load_refs.append([nid, 0])
 
-        # The node takes ONE batched IMAGE, so the references get merged first.
-        # Node ids 50+ are reserved for the merge chain.
-        if load_refs:
-            if len(load_refs) == 1:
-                merged: Any = load_refs[0]
-            else:
-                cls = image_batch_class(info)
-                if cls is None:
-                    raise RuntimeError(
-                        "需要 BatchImagesNode 或 ImageBatch 节点来合并多张参考图，"
-                        "当前 ComfyUI 两者都没有。"
-                    )
-                if cls == "BatchImagesNode":
-                    wf["50"] = {
-                        "class_type": cls,
-                        "inputs": {
-                            f"images.image{i}": r for i, r in enumerate(load_refs)
-                        },
-                    }
-                    merged = ["50", 0]
-                else:
-                    cur = load_refs[0]
-                    for i, r in enumerate(load_refs[1:], start=51):
-                        wf[str(i)] = {
-                            "class_type": cls,
-                            "inputs": {"image1": cur, "image2": r},
-                        }
-                        cur = [str(i), 0]
-                    merged = cur
-
-            # make_node keeps only the keys the node's schema actually declares,
-            # so offering both spellings covers either ComfyUI variant.
-            links["images"] = merged
-            for i, r in enumerate(load_refs, start=1):
-                links[f"images.image_{i}"] = r
-
         wf["5"] = make_node("TextEncodeQwenImage21", info, links, overrides)
+        for i, ref in enumerate(load_refs, start=1):
+            wf["5"]["inputs"][f"images.image_{i}"] = ref
+
         pos, neg = ["5", 0], ["5", 1]
 
         if images:
@@ -539,8 +491,7 @@ def api_config() -> JSONResponse:
         "github_ref": GITHUB_REF,
         "comfy_url": COMFY_URL,
         "input_dir": str(INPUT_DIR),
-        "editing_available": editing_capabilities()[0],
-        "image_batch_node": editing_capabilities()[1],
+        "editing_available": editing_available(),
         "max_reference_images": MAX_REFERENCE_IMAGES,
         "unet": os.environ.get("UNET_NAME", "qwen-image-2.1-UC-Q8_0.gguf"),
         "text_encoder": os.environ.get("CLIP_NAME", "qwen3vl_8b_int8_convrot.safetensors"),
