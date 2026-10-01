@@ -21,6 +21,7 @@ Environment:
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -36,6 +37,13 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
+try:  # Pillow ships with ComfyUI, but never let it break startup
+    from PIL import Image
+
+    HAVE_PIL = True
+except Exception:  # noqa: BLE001
+    HAVE_PIL = False
+
 COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "hsgwktb/qwen-image-2.1-webui")
 GITHUB_REF = os.environ.get("GITHUB_REF", "main")
@@ -46,6 +54,10 @@ PORT = int(os.environ.get("PORT", "7860"))
 INPUT_DIR = Path(os.environ.get("COMFY_INPUT_DIR", "/content/ComfyUI/input"))
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 MAX_REFERENCE_IMAGES = 10
+
+# Uploads are downscaled so neither side exceeds this, aspect ratio preserved.
+# Anything already within the limit keeps its original resolution untouched.
+MAX_UPLOAD_SIDE = int(os.environ.get("MAX_UPLOAD_SIDE", "2048"))
 
 RAW_BASE = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_REF}/web"
 CDN_BASE = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@{GITHUB_REF}/web"
@@ -493,6 +505,8 @@ def api_config() -> JSONResponse:
         "input_dir": str(INPUT_DIR),
         "editing_available": editing_available(),
         "max_reference_images": MAX_REFERENCE_IMAGES,
+        "max_upload_side": MAX_UPLOAD_SIDE,
+        "downscale_on_upload": HAVE_PIL,
         "unet": os.environ.get("UNET_NAME", "qwen-image-2.1-UC-Q8_0.gguf"),
         "text_encoder": os.environ.get("CLIP_NAME", "qwen3vl_8b_int8_convrot.safetensors"),
         "vae": os.environ.get("VAE_NAME", "qwen_image_2.1_vae_bf16.safetensors"),
@@ -638,14 +652,66 @@ def api_image(filename: str, subfolder: str = "", type: str = "output") -> Respo
     )
 
 
+def downscale_to_limit(data: bytes, max_side: int) -> tuple[bytes, dict[str, Any]]:
+    """
+    Shrink an image so neither side exceeds `max_side`, preserving the aspect
+    ratio. Anything already within the limit is returned byte-for-byte
+    unchanged, so an upload never loses resolution it did not have to.
+    """
+    if not HAVE_PIL:
+        return data, {"resized": False, "note": "服务端没有 Pillow，跳过缩放"}
+
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            width, height = im.size
+            fmt = (im.format or "PNG").upper()
+            info: dict[str, Any] = {
+                "original_width": width,
+                "original_height": height,
+                "width": width,
+                "height": height,
+                "resized": False,
+            }
+            if max(width, height) <= max_side:
+                return data, info
+
+            scale = max_side / float(max(width, height))
+            new_w = max(1, round(width * scale))
+            new_h = max(1, round(height * scale))
+
+            work = im
+            if fmt == "JPEG" and work.mode not in ("RGB", "L"):
+                work = work.convert("RGB")
+            elif fmt in ("BMP", "TGA"):
+                work = work.convert("RGBA" if "A" in work.getbands() else "RGB")
+
+            out = work.resize((new_w, new_h), Image.LANCZOS)
+
+            buf = io.BytesIO()
+            if fmt == "JPEG":
+                out.save(buf, format="JPEG", quality=95, subsampling=0, optimize=True)
+            elif fmt == "WEBP":
+                out.save(buf, format="WEBP", quality=95, method=6)
+            else:
+                out.save(buf, format="PNG", optimize=True)
+
+            info.update(width=new_w, height=new_h, resized=True)
+            return buf.getvalue(), info
+    except Exception as exc:  # noqa: BLE001
+        # Pillow cannot read it: keep the bytes and let ComfyUI report the format
+        return data, {"resized": False, "note": f"无法读取图片尺寸: {exc}"}
+
+
 @app.post("/api/upload")
 async def api_upload(request: Request, filename: str = "") -> JSONResponse:
-    """Accept a reference image and drop it into ComfyUI's input directory."""
+    """Accept a reference image, fit it to the size limit, and store it."""
     data = await request.body()
     if not data:
         return JSONResponse({"error": "空文件"}, status_code=400)
     if len(data) > MAX_UPLOAD_BYTES:
         return JSONResponse({"error": "文件过大（上限 32 MB）"}, status_code=413)
+
+    data, info = downscale_to_limit(data, MAX_UPLOAD_SIDE)
 
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(filename or ""))
     if not safe:
@@ -659,9 +725,18 @@ async def api_upload(request: Request, filename: str = "") -> JSONResponse:
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
     (INPUT_DIR / name).write_bytes(data)
 
-    return JSONResponse(
-        {"name": name, "url": "/api/input_image?filename=" + urllib.parse.quote(name)}
-    )
+    payload: dict[str, Any] = {
+        "name": name,
+        "url": "/api/input_image?filename=" + urllib.parse.quote(name),
+    }
+    payload.update(info)
+    if info.get("resized"):
+        # tell the client what happened rather than silently shrinking the file
+        payload["message"] = (
+            f"已等比缩放 {info['original_width']}×{info['original_height']} → "
+            f"{info['width']}×{info['height']}"
+        )
+    return JSONResponse(payload)
 
 
 @app.get("/api/input_image")
