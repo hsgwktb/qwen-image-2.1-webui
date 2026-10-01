@@ -136,15 +136,33 @@ def gpu_snapshot() -> dict:
 # workflow construction — schema-driven so it survives ComfyUI version drift
 # --------------------------------------------------------------------------
 
+# ComfyUI encodes an input as ["INT", {"default": 1024, ...}] for primitives and
+# as [[choice, choice], {...}] for combos. These strings are type markers, never
+# values — feeding one to the server yields
+# "invalid literal for int() with base 10: 'INT'".
+_TYPE_MARKERS = {
+    "INT", "FLOAT", "STRING", "BOOLEAN", "IMAGE", "LATENT", "MASK", "MODEL",
+    "CLIP", "VAE", "CONDITIONING", "CONTROL_NET", "SAMPLER", "SIGMAS",
+    "GUIDER", "NOISE", "AUDIO", "VIDEO", "WEBCAM", "ANY", "*",
+}
+
+
 def _default_for(spec: Any) -> Any:
     """Pull a usable default out of an /object_info input definition."""
     if not isinstance(spec, list) or not spec:
         return None
     first = spec[0]
-    if isinstance(first, list):          # combo
+
+    if isinstance(first, list):                     # combo of allowed values
         return first[0] if first else None
+
+    if isinstance(first, str) and first.upper() in _TYPE_MARKERS:
+        opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+        return opts.get("default")                  # may legitimately be absent
+
     if isinstance(first, (int, float, bool, str)):
         return first
+
     return None
 
 
