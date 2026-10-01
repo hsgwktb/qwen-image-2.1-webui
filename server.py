@@ -302,6 +302,10 @@ def build_workflow(req: dict, info: dict, prefer_modern: bool = True) -> dict:
     cfg = float(req.get("cfg", 1.0))
     seed = int(req.get("seed", 0))
     batch = int(req.get("batch", 1))
+    # Mirror of the official template's "custom_size" switch: when on, editing
+    # samples an explicit width x height canvas instead of one derived from
+    # image_1.
+    custom_size = bool(req.get("custom_size"))
     sampler = req.get("sampler", "euler")
     scheduler = req.get("scheduler", "simple")
     prompt = req.get("prompt", "")
@@ -355,7 +359,6 @@ def build_workflow(req: dict, info: dict, prefer_modern: bool = True) -> dict:
         {"width": width, "height": height, "batch_size": batch},
     )
     latent_ref: list[Any] = ["4", 0]
-
     # --- conditioning + sampling -----------------------------------------
     # Qwen-Image-2.1 ships a dedicated encoder node that returns both
     # conditionings at once; older ComfyUI builds only have CLIPTextEncode.
@@ -392,11 +395,15 @@ def build_workflow(req: dict, info: dict, prefer_modern: bool = True) -> dict:
 
         pos, neg = ["5", 0], ["5", 1]
 
-        if images:
-            # In edit mode the canvas is derived from image_1 rather than from a
-            # blank latent — see the official image-edit template note
-            # "canvas comes from the encode latent (image_1)".
+        if images and not custom_size:
+            # Default (official "custom_size off"): the canvas comes from the
+            # encode latent, i.e. image_1's aspect ratio scaled to the
+            # `resolution` pixel budget. The 宽/高 fields do NOT apply here,
+            # which is why they appear to do nothing while editing.
             latent_ref = ["5", 2]
+        elif images:
+            # "custom_size on": sample an explicit canvas so 宽/高 are honoured.
+            latent_ref = ["4", 0]
     elif images:
         raise RuntimeError(
             "图像编辑需要 ComfyUI 提供 TextEncodeQwenImage21 节点，当前实例没有该节点。"
