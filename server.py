@@ -55,9 +55,13 @@ INPUT_DIR = Path(os.environ.get("COMFY_INPUT_DIR", "/content/ComfyUI/input"))
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 MAX_REFERENCE_IMAGES = 10
 
-# Uploads are downscaled so neither side exceeds this, aspect ratio preserved.
-# Anything already within the limit keeps its original resolution untouched.
-MAX_UPLOAD_SIDE = int(os.environ.get("MAX_UPLOAD_SIDE", "2048"))
+# Optional upload downscaling. 0 (the default) means references are stored
+# exactly as uploaded and keep their original resolution; set it to e.g. 2048
+# to cap the longest side instead.
+MAX_UPLOAD_SIDE = int(os.environ.get("MAX_UPLOAD_SIDE", "0"))
+
+# Upper bound of the node's own `resolution` widget, used to bound the UI slider.
+MAX_RESOLUTION = 4096
 
 RAW_BASE = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_REF}/web"
 CDN_BASE = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@{GITHUB_REF}/web"
@@ -505,8 +509,9 @@ def api_config() -> JSONResponse:
         "input_dir": str(INPUT_DIR),
         "editing_available": editing_available(),
         "max_reference_images": MAX_REFERENCE_IMAGES,
-        "max_upload_side": MAX_UPLOAD_SIDE,
-        "downscale_on_upload": HAVE_PIL,
+        "max_upload_side": MAX_UPLOAD_SIDE,  # 0 = 不缩放，保留原分辨率
+        "downscale_on_upload": MAX_UPLOAD_SIDE > 0 and HAVE_PIL,
+        "max_resolution": MAX_RESOLUTION,
         "unet": os.environ.get("UNET_NAME", "qwen-image-2.1-UC-Q8_0.gguf"),
         "text_encoder": os.environ.get("CLIP_NAME", "qwen3vl_8b_int8_convrot.safetensors"),
         "vae": os.environ.get("VAE_NAME", "qwen_image_2.1_vae_bf16.safetensors"),
@@ -654,12 +659,16 @@ def api_image(filename: str, subfolder: str = "", type: str = "output") -> Respo
 
 def downscale_to_limit(data: bytes, max_side: int) -> tuple[bytes, dict[str, Any]]:
     """
-    Shrink an image so neither side exceeds `max_side`, preserving the aspect
-    ratio. Anything already within the limit is returned byte-for-byte
-    unchanged, so an upload never loses resolution it did not have to.
+    Optionally shrink an image so neither side exceeds `max_side`, preserving
+    the aspect ratio.
+
+    `max_side <= 0` disables scaling entirely: the bytes are stored exactly as
+    uploaded, so the reference keeps its original resolution and is never
+    re-encoded. Images already within the limit are likewise passed through
+    untouched.
     """
     if not HAVE_PIL:
-        return data, {"resized": False, "note": "服务端没有 Pillow，跳过缩放"}
+        return data, {"resized": False, "note": "服务端没有 Pillow，无法读取尺寸"}
 
     try:
         with Image.open(io.BytesIO(data)) as im:
@@ -672,7 +681,7 @@ def downscale_to_limit(data: bytes, max_side: int) -> tuple[bytes, dict[str, Any
                 "height": height,
                 "resized": False,
             }
-            if max(width, height) <= max_side:
+            if max_side <= 0 or max(width, height) <= max_side:
                 return data, info
 
             scale = max_side / float(max(width, height))
