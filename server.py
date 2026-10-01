@@ -227,10 +227,14 @@ def make_node(class_type: str, info: dict, links: dict, overrides: dict) -> dict
 def image_batch_class(info: dict) -> str | None:
     """
     Node used to merge several reference images into the single batched IMAGE
-    that TextEncodeQwenImage21 expects. The official template uses
-    BatchImagesNode; classic ComfyUI only ships the two-input ImageBatch.
+    that TextEncodeQwenImage21 expects.
+
+    ImageBatch (plain image1/image2, and it rescales image2 to match image1) is
+    preferred because its contract is unambiguous. BatchImagesNode is the node
+    the official template uses, but it takes a variable list of dotted inputs
+    whose exact names differ between builds.
     """
-    for c in ("BatchImagesNode", "ImageBatch", "ImageBatchMulti"):
+    for c in ("ImageBatch", "ImageBatchMulti", "BatchImagesNode"):
         if c in info:
             return c
     return None
